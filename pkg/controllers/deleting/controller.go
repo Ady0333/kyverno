@@ -279,7 +279,7 @@ func (c *controller) reconcile(ctx context.Context, logger logr.Logger, key, nam
 	}
 
 	var execErr error
-	// In case it is the time to do the cleanup process
+	// In case it is the time to do the deleting process
 	if time.Now().After(*executionTime) {
 		execErr = c.deleting(ctx, logger, policy)
 		if execErr == nil {

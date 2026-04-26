@@ -245,15 +245,14 @@ func TestReconcile_ClampPastNextExecution(t *testing.T) {
 	}
 }
 
-// TestReconcile_CleanupError_CronNeverRearmed confirms the bug: when cleanup()
-// returns a non-recoverable error, reconcile returns early without calling
-// queue.AddAfter, permanently disabling the cron schedule for this policy.
-func TestReconcile_CleanupError_CronNeverRearmed(t *testing.T) {
+// TestReconcile_CleanupError_CronStillRearmed verifies that queue.AddAfter is called
+// even when cleanup() returns a non-recoverable error, so the cron schedule survives
+// transient failures and is not permanently disabled.
+func TestReconcile_CleanupError_CronStillRearmed(t *testing.T) {
 	pol := &kyvernov2.CleanupPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-pol",
 			Namespace: "ns1",
-			// CreationTimestamp zero means GetExecutionTime uses LastExecutionTime.
 		},
 		Spec: kyvernov2.CleanupPolicySpec{
 			Schedule: "* * * * *", // every minute

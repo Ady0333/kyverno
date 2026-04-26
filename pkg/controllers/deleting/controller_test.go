@@ -12,6 +12,7 @@ import (
 	enginecompiler "github.com/kyverno/kyverno/pkg/cel/policies/dpol/compiler"
 	dpolengine "github.com/kyverno/kyverno/pkg/cel/policies/dpol/engine"
 	versionedfake "github.com/kyverno/kyverno/pkg/client/clientset/versioned/fake"
+	"github.com/kyverno/kyverno/pkg/clients/dclient"
 	"github.com/kyverno/kyverno/pkg/config/mocks"
 	"github.com/stretchr/testify/assert"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -57,10 +58,12 @@ func Test_SkipResourceDueToFilter(t *testing.T) {
 // captureQueue wraps a real typed queue but captures the last AddAfter delay used by the controller.
 type captureQueue struct {
 	workqueue.TypedRateLimitingInterface[any]
-	lastDelay time.Duration
+	lastDelay      time.Duration
+	addAfterCalled bool
 }
 
 func (c *captureQueue) AddAfter(item any, delay time.Duration) {
+	c.addAfterCalled = true
 	c.lastDelay = delay
 	c.TypedRateLimitingInterface.AddAfter(item, delay)
 }
@@ -128,6 +131,52 @@ func TestReconcile_ClampPastNextExecution(t *testing.T) {
 	if cq.lastDelay < minRequeueDelay-100*time.Millisecond || cq.lastDelay > minRequeueDelay+60*time.Second {
 		t.Fatalf("expected delay to next cron minute, got %v", cq.lastDelay)
 	}
+}
+
+// TestReconcile_DeletingError_CronStillRearmed verifies that queue.AddAfter is called
+// even when deleting() returns an error, so the cron schedule survives transient failures.
+func TestReconcile_DeletingError_CronStillRearmed(t *testing.T) {
+	pol := policiesv1beta1.DeletingPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "dpol",
+		},
+		Spec: policiesv1beta1.DeletingPolicySpec{
+			Schedule:         "* * * * *",
+			MatchConstraints: nil, // nil causes deleting() to return an error immediately
+		},
+		Status: policiesv1beta1.DeletingPolicyStatus{
+			LastExecutionTime: metav1.NewTime(
+				time.Date(1901, 1, 1, 0, 0, 0, 0, time.UTC),
+			),
+		},
+	}
+
+	fakeClient := versionedfake.NewSimpleClientset(&pol)
+
+	baseQ := workqueue.NewTypedRateLimitingQueueWithConfig(
+		workqueue.DefaultTypedControllerRateLimiter[any](),
+		workqueue.TypedRateLimitingQueueConfig[any]{Name: "test-deleting-err"},
+	)
+	cq := &captureQueue{TypedRateLimitingInterface: baseQ}
+
+	provider := providerAdapter{
+		fetch: func(_ context.Context) ([]dpolengine.Policy, error) {
+			return []dpolengine.Policy{{Policy: &pol}}, nil
+		},
+		name: pol.Name,
+	}
+
+	c := &controller{
+		client:        dclient.NewEmptyFakeClient(),
+		kyvernoClient: fakeClient,
+		queue:         cq,
+		provider:      provider,
+	}
+
+	err := c.reconcile(context.Background(), logr.Discard(), "dpol", "", "dpol")
+
+	assert.Error(t, err, "reconcile must surface the deleting error so the workqueue can rate-limit retries")
+	assert.True(t, cq.addAfterCalled, "AddAfter must be called even when deleting fails so the cron schedule survives")
 }
 
 type providerAdapter struct {
